@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neon Air Draw</title>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#000; overflow:hidden; font-family:'Segoe UI', sans-serif; }
+
+  video {
+    position:absolute; top:0; left:0;
+    width:100%; height:100%;
+    object-fit:cover;
+    transform:scaleX(-1);
+    opacity:0.25; /* dim camera so the glow pops */
+  }
+
+  canvas {
+    position:absolute; top:0; left:0;
+    width:100%; height:100%;
+    transform:scaleX(-1);
+  }
+
+  #hud {
+    position:absolute; top:20px; left:20px; z-index:10;
+    color:#00f6ff; font-size:0.8rem; letter-spacing:0.15em;
+    text-transform:uppercase;
+    background:rgba(10,14,20,0.5);
+    border:1px solid rgba(0,246,255,0.25);
+    border-radius:10px;
+    padding:12px 16px;
+    backdrop-filter:blur(10px);
+    line-height:1.8;
+  }
+
+  #startBtn {
+    position:absolute; top:50%; left:50%;
+    transform:translate(-50%,-50%);
+    z-index:20;
+    padding:16px 40px;
+    font-size:1.1rem;
+    background:linear-gradient(45deg,#00f6ff,#a742ff,#ff2fb2);
+    border:none; color:#000; font-weight:700;
+    border-radius:30px; cursor:pointer;
+    letter-spacing:0.1em; text-transform:uppercase;
+  }
+</style>
+</head>
+<body>
+
+<button id="startBtn">Start Drawing</button>
+
+<div id="hud" style="display:none">
+  ☝️ Index finger up → draw<br>
+  ✊ Fist → clear canvas<br>
+  🤏 Pinch → pause / resume
+</div>
+
+<video id="video" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W = canvas.width = window.innerWidth;
+let H = canvas.height = window.innerHeight;
+
+window.addEventListener('resize', () => {
+  // preserve drawing on resize
+  const snapshot = ctx.getImageData(0,0,canvas.width,canvas.height);
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  ctx.putImageData(snapshot,0,0);
+});
+
+let hue = 190;          // starting neon color (cyan), shifts over time
+let drawing = false;
+let paused = false;
+let lastPoint = null;
+
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+// Decide gesture from landmarks
+function getGesture(lm){
+  const wrist = lm[0];
+  const tips = [8,12,16,20].map(i => lm[i]);
+  const mcp  = [5,9,13,17].map(i => lm[i]);
+
+  // finger "up" = tip is further from wrist than its knuckle
+  const indexUp  = dist(lm[8], wrist)  > dist(lm[5], wrist) * 1.15;
+  const middleUp = dist(lm[12], wrist) > dist(lm[9], wrist) * 1.15;
+  const ringUp   = dist(lm[16], wrist) > dist(lm[13], wrist) * 1.15;
+  const pinkyUp  = dist(lm[20], wrist) > dist(lm[17], wrist) * 1.15;
+
+  const pinchDist = dist(lm[4], lm[8]);
+  const handScale = dist(lm[0], lm[5]) || 0.1;
+  const isPinching = (pinchDist / handScale) < 0.5;
+
+  const allDown = !indexUp && !middleUp && !ringUp && !pinkyUp;
+
+  if (isPinching) return 'pinch';
+  if (allDown) return 'fist';
+  if (indexUp && !middleUp) return 'point';
+  return 'other';
+}
+
+function drawGlowLine(p1, p2, color){
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = color;
+  ctx.shadowBlur = 20;
+  ctx.shadowColor = color;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(p1.x, p1.y);
+  ctx.lineTo(p2.x, p2.y);
+  ctx.stroke();
+
+  // extra bright core
+  ctx.shadowBlur = 6;
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#ffffff';
+  ctx.stroke();
+  ctx.restore();
+}
+
+let lastFistTime = 0;
+
+function onResults(results){
+  hue = (hue + 0.3) % 360;
+
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
+    lastPoint = null;
+    return;
+  }
+
+  const lm = results.multiHandLandmarks[0];
+  const gesture = getGesture(lm);
+  const tip = lm[8]; // index fingertip
+  const point = { x: tip.x * W, y: tip.y * H };
+
+  if (gesture === 'fist'){
+    const now = performance.now();
+    if (now - lastFistTime > 400){ // debounce clear
+      ctx.clearRect(0,0,W,H);
+      lastFistTime = now;
+    }
+    lastPoint = null;
+    return;
+  }
+
+  if (gesture === 'pinch'){
+    paused = !paused;
+    lastPoint = null;
+    // small debounce so it doesn't flicker every frame while pinched
+    return;
+  }
+
+  if (gesture === 'point' && !paused){
+    const color = `hsl(${hue}, 100%, 60%)`;
+    if (lastPoint){
+      drawGlowLine(lastPoint, point, color);
+    }
+    lastPoint = point;
+  } else {
+    lastPoint = null;
+  }
+}
+
+function startApp(){
+  document.getElementById('startBtn').style.display = 'none';
+  document.getElementById('hud').style.display = 'block';
+
+  const hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.7
+  });
+  hands.onResults(onResults);
+
+  const camera = new Camera(video, {
+    onFrame: async () => { await hands.send({ image: video }); },
+    width: 1280,
+    height: 720
+  });
+  camera.start();
+}
+
+document.getElementById('startBtn').addEventListener('click', startApp);
+</script>
+</body>
+</html>
